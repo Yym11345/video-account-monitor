@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video Account Monitor"
+  short_description: "Monitor creator video metrics and export reports."
+  default_prompt: "Monitor this creator account and export an HTML report plus CSV."

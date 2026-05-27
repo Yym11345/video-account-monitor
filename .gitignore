@@ -1,0 +1,17 @@
+# Sensitive local auth/session data
+cookies*.json
+cookies*.txt
+*.cookies
+private/
+.env
+
+# Generated reports and local run outputs
+outputs/
+
+# Temporary backups
+*.bak
+
+# Dependencies / caches
+node_modules/
+__pycache__/
+*.pyc

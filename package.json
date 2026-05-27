@@ -1,0 +1,12 @@
+{
+  "name": "video-account-monitor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/monitor.test.mjs",
+    "demo": "node scripts/monitor.mjs --demo --out ./outputs/demo"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}
