@@ -123,7 +123,7 @@ function normalizeVideo(video, account) {
     accountName: video.accountName || account.name || "",
     id: String(video.id || video.bvid || video.awemeId || video.noteId || ""),
     title: String(video.title || ""),
-    url: String(video.url || ""),
+    url: redactSensitiveText(String(video.url || "")),
     publishedAt: String(video.publishedAt || video.createdAt || ""),
     duration: String(video.duration || ""),
     likes: asNumber(video.likes ?? video.like),
@@ -139,7 +139,7 @@ export function normalizeDataset(input) {
   const account = {
     platform: String(input.account?.platform || ""),
     id: String(input.account?.id || ""),
-    url: String(input.account?.url || ""),
+    url: redactSensitiveText(String(input.account?.url || "")),
     name: String(input.account?.name || ""),
     followers: asNumber(input.account?.followers),
     following: asNumber(input.account?.following),
@@ -148,7 +148,7 @@ export function normalizeDataset(input) {
     totalViews: asNumber(input.account?.totalViews),
     totalComments: asNumber(input.account?.totalComments),
     collectionStatus: String(input.account?.collectionStatus || "complete"),
-    warnings: Array.isArray(input.account?.warnings) ? input.account.warnings.map(String) : [],
+    warnings: Array.isArray(input.account?.warnings) ? input.account.warnings.map((warning) => redactSensitiveText(warning)) : [],
     fetchedAt: input.account?.fetchedAt || new Date().toISOString(),
   };
   const videos = (input.videos || []).map((video) => normalizeVideo(video, account));
@@ -177,6 +177,15 @@ function safeHref(value) {
 
 function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(asNumber(value));
+}
+
+function redactSensitiveText(value) {
+  return String(value || "")
+    .replace(/([?&]xsec_token=)[^&\s)]+/gi, "$1REDACTED")
+    .replace(/(%3[FfAa]|[?&,\s\{\[])(xsec_token)(%3[Dd]|=)([^&\s,\}\]]+)/gi, "$1$2$3REDACTED")
+    .replace(/(["']xsec_token["']\s*:\s*["'])[^"']+/gi, "$1REDACTED")
+    .replace(/(Cookie\s*:\s*)[^\r\n]+/gi, "$1REDACTED")
+    .replace(/\b(a1|web_session|sessionid|sid_guard|uid_tt|msToken)=([^;,\s]+)/gi, "$1=REDACTED");
 }
 
 function escapeHtml(value) {
@@ -326,6 +335,17 @@ function cookiesToHeader(cookies) {
   return (cookies || []).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
 }
 
+export function buildBrowserLaunchOptions() {
+  return {
+    acceptDownloads: true,
+    channel: "chrome",
+    headless: false,
+    viewport: { width: 1920, height: 1080 },
+    locale: "zh-CN",
+    timezoneId: "Asia/Shanghai",
+  };
+}
+
 export function isPlatformHostname(hostname, hosts) {
   return hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
 }
@@ -358,14 +378,14 @@ async function getCookiesWithTimeout(context, timeoutMs = 3000) {
 
 async function waitForBrowserLogin({ context, page, config, platform, userDataDir }) {
   const deadline = Date.now() + 10 * 60 * 1000;
-  const pageReadyAt = platform === "xiaohongshu" ? Date.now() + 15 * 1000 : 0;
+  const browserReadyAt = platform === "xiaohongshu" ? Date.now() + 15 * 1000 : 0;
   while (Date.now() < deadline) {
     const cookies = await getCookiesWithTimeout(context);
     const platformCookies = filterPlatformCookies(cookies, config.hosts);
     if (hasLoginCookie(platformCookies, config)) {
       return platformCookies;
     }
-    if (pageReadyAt && Date.now() >= pageReadyAt) {
+    if (browserReadyAt && Date.now() >= browserReadyAt) {
       console.log("Xiaohongshu login cookie was not detected; continuing with browser page collection.");
       return platformCookies;
     }
@@ -419,12 +439,7 @@ async function withBrowserSession({ platform, account, profile }, callback) {
   const startUrl = resolveBrowserStartUrl(platform, account);
   await mkdir(userDataDir, { recursive: true });
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    acceptDownloads: true,
-    channel: "chrome",
-    headless: false,
-    viewport: { width: 1365, height: 900 },
-  });
+  const context = await chromium.launchPersistentContext(userDataDir, buildBrowserLaunchOptions(platform));
 
   try {
     const page = context.pages()[0] || await context.newPage();
@@ -432,12 +447,7 @@ async function withBrowserSession({ platform, account, profile }, callback) {
     console.log(`Browser auth opened ${platform}. Please log in manually if needed. Profile: ${userDataDir}`);
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (platform === "xiaohongshu") {
-        console.log("Xiaohongshu browser session opened; handing control to the Xiaohongshu adapter.");
-      }
-      const platformCookies = platform === "xiaohongshu"
-        ? []
-        : await waitForBrowserLogin({ context, page, config, platform, userDataDir });
+      const platformCookies = await waitForBrowserLogin({ context, page, config, platform, userDataDir });
       try {
         return await callback({ context, page, cookieHeader: cookiesToHeader(platformCookies), userDataDir });
       } catch (error) {
@@ -539,7 +549,7 @@ async function main() {
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
-    console.error(error.stack || error.message || String(error));
+    console.error(redactSensitiveText(error.stack || error.message || String(error)));
     process.exit(1);
   });
 }

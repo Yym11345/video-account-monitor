@@ -1,13 +1,26 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // ── Python executable ────────────────────────────────────────────────
-const PYTHON = process.env.XHS_PYTHON || process.env.PYTHON || "python";
+function resolveXhsPython() {
+  const candidate = process.env.XHS_PYTHON;
+  if (!candidate) {
+    throw new Error("Set XHS_PYTHON to an absolute Python interpreter path before Xiaohongshu signed API collection.");
+  }
+  const normalized = normalize(candidate).replace(/\\/g, "/");
+  if (!isAbsolute(normalized)) {
+    throw new Error("XHS_PYTHON must be an absolute local interpreter path.");
+  }
+  if (/^\/[a-zA-Z]\//.test(normalized)) {
+    return `${normalized[1].toUpperCase()}:/${normalized.slice(3)}`;
+  }
+  return normalized;
+}
 
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 const XHS_RISK_CONTROL_PATTERN = /验证码|验证|安全验证|风险|频繁|登录已过期|请登录|扫码登录|captcha|verify|verification|risk|login expired|session expired/i;
@@ -40,16 +53,58 @@ function shortHash(value) {
 
 // ── Python signing bridge ────────────────────────────────────────────
 function signRequest(uri, cookieHeader, method = "GET", params = null, payload = null) {
-  if (!cookieHeader || !cookieHeader.includes("a1=")) {
+  if (!hasXhsSignedApiCookies(cookieHeader)) {
     throw new Error("XHS browser login is incomplete. Finish login/verification in the opened browser and retry.");
   }
   const input = JSON.stringify({ uri, cookies: cookieHeader, method, params, payload });
-  const result = execFileSync(PYTHON, [join(__dirname, "xhs_sign_helper.py")], {
+  const result = execFileSync(resolveXhsPython(), [join(__dirname, "xhs_sign_helper.py")], {
     input,
     encoding: "utf8",
     timeout: 30000,
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: "utf-8",
+    },
+    windowsHide: true,
   });
   return JSON.parse(result.trim());
+}
+
+function isXhsHostname(hostname) {
+  return hostname === "xiaohongshu.com" || hostname.endsWith(".xiaohongshu.com");
+}
+
+function isXhsApiUrl(value, paths) {
+  try {
+    const url = new URL(value);
+    return isXhsHostname(url.hostname) && paths.includes(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function publicXhsUrl(value) {
+  try {
+    const url = new URL(value);
+    url.searchParams.delete("xsec_token");
+    url.searchParams.delete("xsec_source");
+    return url.href;
+  } catch {
+    return String(value || "");
+  }
+}
+
+function redactXhsText(value) {
+  return String(value || "")
+    .replace(/([?&]xsec_token=)[^&\s)]+/gi, "$1REDACTED")
+    .replace(/(%3[FfAa]|[?&,\s\{\[])(xsec_token)(%3[Dd]|=)([^&\s,\}\]]+)/gi, "$1$2$3REDACTED")
+    .replace(/(["']xsec_token["']\s*:\s*["'])[^"']+/gi, "$1REDACTED")
+    .replace(/(Cookie\s*:\s*)[^\r\n]+/gi, "$1REDACTED")
+    .replace(/\b(a1|web_session|sessionid|sid_guard|uid_tt|msToken)=([^;,\s]+)/gi, "$1=REDACTED");
+}
+
+function redactXhsUrl(value) {
+  return redactXhsText(value);
 }
 
 // ── URL parsing ──────────────────────────────────────────────────────
@@ -270,7 +325,7 @@ function noteXsecSource(note, fallback = "pc_feed") {
   return note.xsec_source || note.xsecSource || noteCard.xsec_source || noteCard.xsecSource || fallback || "pc_feed";
 }
 
-export function buildXhsNoteUrl(noteIdValue, xsecToken = "", xsecSource = "pc_feed") {
+function buildXhsRequestNoteUrl(noteIdValue, xsecToken = "", xsecSource = "pc_feed") {
   if (!noteIdValue || String(noteIdValue).startsWith("xhs-card-")) return "";
   const url = new URL(`https://www.xiaohongshu.com/explore/${noteIdValue}`);
   if (xsecToken) url.searchParams.set("xsec_token", xsecToken);
@@ -278,8 +333,17 @@ export function buildXhsNoteUrl(noteIdValue, xsecToken = "", xsecSource = "pc_fe
   return url.href;
 }
 
+export function buildXhsNoteUrl(noteIdValue) {
+  if (!noteIdValue || String(noteIdValue).startsWith("xhs-card-")) return "";
+  return `https://www.xiaohongshu.com/explore/${noteIdValue}`;
+}
+
 function localCookiesToHeader(cookies) {
   return (cookies || []).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+}
+
+export function hasXhsSignedApiCookies(cookieHeader = "") {
+  return /(?:^|;\s*)a1=/.test(cookieHeader) && /(?:^|;\s*)web_session=/.test(cookieHeader);
 }
 
 async function getActiveBrowserCookieHeader(context) {
@@ -311,7 +375,7 @@ function browserVideoKey(video) {
   return video.id || video.url || video.title;
 }
 
-function mergeBrowserVideo(existing, incoming) {
+export function mergeXhsBrowserVideo(existing, incoming) {
   if (!existing) return incoming;
   return {
     ...existing,
@@ -328,14 +392,14 @@ function mergeBrowserVideo(existing, incoming) {
   };
 }
 
-function normalizeBrowserVideo(video) {
+export function normalizeBrowserVideo(video) {
   const idFromUrl = (video.url || "").match(/\/explore\/([^/?#]+)/)?.[1] || "";
   const id = String(video.id || idFromUrl || `xhs-card-${shortHash(video.title || video.url || "browser")}`);
-  const url = video.url && !video.url.match(/\/explore\/?(?:[?#].*)?$/) ? video.url : "";
+  const url = id.startsWith("xhs-card-") ? publicXhsUrl(video.url) : buildXhsNoteUrl(id);
   return {
     id,
     title: String(video.title || ""),
-    url: String(url || (id.startsWith("xhs-card-") ? "" : `https://www.xiaohongshu.com/explore/${id}`)),
+    url: String(url),
     publishedAt: String(video.publishedAt || ""),
     duration: "",
     likes: parseXhsMetric(video.likes),
@@ -355,7 +419,7 @@ function notesToBrowserVideos(notes) {
     return normalizeBrowserVideo({
       id: currentNoteId,
       title: noteCard.title || note.title || note.display_title || "",
-      url: buildXhsNoteUrl(currentNoteId, noteXsecToken(note), noteXsecSource(note)),
+      url: buildXhsNoteUrl(currentNoteId),
       publishedAt: toIso(note.time || noteCard.time),
       likes: parseXhsMetric(interactInfo.liked_count, interactInfo.likedCount, note.liked_count, note.likedCount, noteCard.liked_count, noteCard.likedCount),
       comments: parseXhsMetric(interactInfo.comment_count, interactInfo.commentCount, note.comment_count, note.commentCount, noteCard.comment_count, noteCard.commentCount),
@@ -407,6 +471,27 @@ export function extractXhsInitialState(text) {
   } catch {
     return null;
   }
+}
+
+function getXhsDetailNoteId(detail) {
+  const note = detail?.note || detail?.note_card || detail?.noteCard || detail || {};
+  return note.note_id || note.noteId || note.id || detail?.note_id || detail?.noteId || detail?.id || "";
+}
+
+function findXhsNoteDetail(state, noteIdValue) {
+  const noteMap = state?.note?.noteDetailMap || state?.note?.note_detail_map || findFirstObjectByKeys(state, ["noteDetailMap", "note_detail_map"]);
+  const detail = noteMap?.noteDetailMap || noteMap?.note_detail_map || noteMap;
+  const entry = detail?.[noteIdValue];
+  if (!entry) return null;
+  const note = entry?.note || entry?.note_card || entry?.noteCard || entry || null;
+  if (note && getXhsDetailNoteId(note) && getXhsDetailNoteId(note) !== noteIdValue) return null;
+  return note;
+}
+
+export function extractXhsNoteDetailFromHtml(noteIdValue, html) {
+  if (!String(html || "").includes("noteDetailMap") && !String(html || "").includes("note_detail_map")) return null;
+  const state = extractXhsInitialState(html);
+  return findXhsNoteDetail(state, noteIdValue);
 }
 
 function findFirstObjectByKeys(value, keys) {
@@ -490,20 +575,51 @@ async function getCreatorNotes({ userId, xsecToken, xsecSource, cookieHeader, li
   }).slice(0, limit || undefined);
 }
 
+async function fetchNoteDetailFromHtml(noteIdValue, xsecToken, xsecSource, cookieHeader) {
+  const url = buildXhsRequestNoteUrl(noteIdValue, xsecToken, xsecSource);
+  if (!url) throw new Error("XHS HTML detail fallback could not build note URL.");
+  const response = await fetchWithTimeout(url, {
+    headers: buildHeaders(DEFAULT_USER_AGENT, cookieHeader),
+  });
+  const html = await response.text();
+  throwIfRiskControl(html.slice(0, 2000));
+  if (!response.ok) {
+    throw new Error(`XHS HTML detail fallback returned HTTP ${response.status}.`);
+  }
+  const detail = extractXhsNoteDetailFromHtml(noteIdValue, html);
+  if (!detail) {
+    throw new Error("XHS HTML detail fallback did not expose the requested note.");
+  }
+  return detail;
+}
+
 async function fetchNoteDetail(note, index, fallback, cookieHeader) {
   const currentNoteId = noteId(note, index);
   if (currentNoteId.startsWith("xhs-card-")) return null;
   const xsecToken = noteXsecToken(note, fallback.xsecToken);
   const xsecSource = noteXsecSource(note, fallback.xsecSource || "pc_feed");
-  const detail = await xhsPost("/api/sns/web/v1/feed", {
-    source_note_id: currentNoteId,
-    image_formats: ["jpg", "webp", "avif"],
-    extra: { need_body_topic: 1 },
-    xsec_token: xsecToken,
-    xsec_source: xsecSource,
-  }, cookieHeader, 3);
-  const item = (detail.data?.items || detail.items || [])[0];
-  return item?.note_card || item?.noteCard || item || null;
+  try {
+    const detail = await xhsPost("/api/sns/web/v1/feed", {
+      source_note_id: currentNoteId,
+      image_formats: ["jpg", "webp", "avif"],
+      extra: { need_body_topic: 1 },
+      xsec_token: xsecToken,
+      xsec_source: xsecSource,
+    }, cookieHeader, 3);
+    const item = (detail.data?.items || detail.items || [])[0];
+    const candidate = item?.note_card || item?.noteCard || item || null;
+    if (!candidate) {
+      throw new Error(`XHS feed detail returned no item for ${currentNoteId}.`);
+    }
+    const returnedId = getXhsDetailNoteId(candidate);
+    if (returnedId && returnedId !== currentNoteId) {
+      throw new Error(`XHS feed detail returned ${returnedId} for ${currentNoteId}.`);
+    }
+    return candidate;
+  } catch (error) {
+    if (isRiskControlMessage(error.message)) throw error;
+    return await fetchNoteDetailFromHtml(currentNoteId, xsecToken, xsecSource, cookieHeader);
+  }
 }
 
 function mapXhsVideo({ note, detail, index, fallback }) {
@@ -515,7 +631,7 @@ function mapXhsVideo({ note, detail, index, fallback }) {
   return {
     id: String(currentNoteId),
     title: noteCard.title || note.title || note.display_title || "",
-    url: buildXhsNoteUrl(currentNoteId, xsecToken, xsecSource),
+    url: buildXhsNoteUrl(currentNoteId),
     publishedAt: toIso(noteCard.time || detail?.time || note.time),
     duration: "",
     likes: parseXhsMetric(interactInfo.liked_count, interactInfo.likedCount, note.liked_count, note.likedCount, noteCard.liked_count, noteCard.likedCount),
@@ -529,9 +645,7 @@ function mapXhsVideo({ note, detail, index, fallback }) {
 
 async function collectWithSignedApi({ account, cookieHeader, limit, delay, creatorInfo = {} }) {
   const { userId, xsecToken, xsecSource } = extractUserId(account);
-  const profileUrl = xsecToken
-    ? `https://www.xiaohongshu.com/user/profile/${userId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=${encodeURIComponent(xsecSource || "pc_feed")}`
-    : `https://www.xiaohongshu.com/user/profile/${userId}`;
+  const profileUrl = `https://www.xiaohongshu.com/user/profile/${userId}`;
   const uniqueNotes = await getCreatorNotes({ userId, xsecToken, xsecSource, cookieHeader, limit, delay });
   console.log(`Xiaohongshu signed API list collected ${uniqueNotes.length} unique note(s).`);
   const details = new Map();
@@ -551,7 +665,7 @@ async function collectWithSignedApi({ account, cookieHeader, limit, delay, creat
     } catch (error) {
       if (isRiskControlMessage(error.message)) throw error;
       detailFailures += 1;
-      firstDetailFailure ||= error.message;
+      firstDetailFailure ||= redactXhsText(error.message);
     }
     await sleep(Math.min(delay, 1000));
   }
@@ -600,30 +714,31 @@ export async function collectWithBrowser({ account, context, page, cookieHeader 
   let userId = parsedAccount?.userId || "";
   let xsecToken = parsedAccount?.xsecToken || "";
   let xsecSource = parsedAccount?.xsecSource || "";
-  let profileUrl = userId
+  let requestProfileUrl = userId
     ? (xsecToken
         ? `https://www.xiaohongshu.com/user/profile/${userId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=${encodeURIComponent(xsecSource || "pc_feed")}`
         : `https://www.xiaohongshu.com/user/profile/${userId}`)
     : String(account);
+  let profileUrl = publicXhsUrl(requestProfileUrl);
   const collected = new Map();
   const warnings = ["Xiaohongshu used browser page auto-scroll collection; some metrics may still be unavailable if the page hides them."];
 
   page.on("response", async (response) => {
     try {
       const url = response.url();
-      if (!url.includes("xiaohongshu.com") || (!url.includes("user_posted") && !url.includes("/feed"))) return;
+      if (!isXhsApiUrl(url, ["/api/sns/web/v1/user_posted", "/api/sns/web/v1/feed"])) return;
       const data = await response.json();
       const notes = data.data?.notes || data.data?.items || [];
       for (const video of notesToBrowserVideos(notes)) {
         const key = browserVideoKey(video);
-        if (key) collected.set(key, mergeBrowserVideo(collected.get(key), video));
+        if (key) collected.set(key, mergeXhsBrowserVideo(collected.get(key), video));
       }
     } catch {
     }
   });
 
-  console.log(`Xiaohongshu adapter navigating profile: ${profileUrl}`);
-  await page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+  console.log(`Xiaohongshu adapter navigating profile: ${redactXhsUrl(requestProfileUrl)}`);
+  await page.goto(requestProfileUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
   console.log("Xiaohongshu profile page loaded; checking verification state.");
   await waitForUserVerification(page, delay);
   try {
@@ -631,27 +746,28 @@ export async function collectWithBrowser({ account, context, page, cookieHeader 
     userId = resolved.userId;
     xsecToken = resolved.xsecToken || xsecToken;
     xsecSource = resolved.xsecSource || xsecSource;
-    profileUrl = xsecToken
+    requestProfileUrl = xsecToken
       ? `https://www.xiaohongshu.com/user/profile/${userId}?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=${encodeURIComponent(xsecSource || "pc_feed")}`
       : `https://www.xiaohongshu.com/user/profile/${userId}`;
+    profileUrl = publicXhsUrl(requestProfileUrl);
   } catch {
     if (!userId) throw new Error("Could not resolve Xiaohongshu profile URL in the opened browser.");
   }
   const creatorInfo = await extractCreatorInfoFromPage(page);
   console.log("Xiaohongshu profile info extracted; checking signed API cookies.");
   const activeCookieHeader = context ? await getActiveBrowserCookieHeader(context) : cookieHeader;
-  if (activeCookieHeader.includes("a1=")) {
+  if (hasXhsSignedApiCookies(activeCookieHeader)) {
     try {
       console.log("Xiaohongshu signed API cookies detected; collecting through signed API.");
-      const signedDataset = await collectWithSignedApi({ account: profileUrl, cookieHeader: activeCookieHeader, limit, delay, creatorInfo });
+      const signedDataset = await collectWithSignedApi({ account: requestProfileUrl, cookieHeader: activeCookieHeader, limit, delay, creatorInfo });
       if (signedDataset.videos.length > 0) return signedDataset;
       warnings.push("Signed Xiaohongshu API returned no videos; falling back to browser page collection.");
     } catch (error) {
       if (isRiskControlMessage(error.message)) throw error;
-      warnings.push(`Signed Xiaohongshu API collection failed; falling back to browser page collection: ${error.message}`);
+      warnings.push(`Signed Xiaohongshu API collection failed; falling back to browser page collection: ${redactXhsText(error.message)}`);
     }
   } else {
-    warnings.push("Active Xiaohongshu browser cookies do not include a1; using browser page collection fallback.");
+    warnings.push("Active Xiaohongshu browser cookies are incomplete for signed API; using browser page collection fallback.");
   }
 
   console.log("Xiaohongshu browser fallback scrolling started.");
@@ -661,7 +777,7 @@ export async function collectWithBrowser({ account, context, page, cookieHeader 
   for (let scroll = 0; scroll < maxScrolls && collected.size < limit; scroll += 1) {
     for (const video of (await extractBrowserVideos(page)).map(normalizeBrowserVideo)) {
       const key = browserVideoKey(video);
-      if (key) collected.set(key, mergeBrowserVideo(collected.get(key), video));
+      if (key) collected.set(key, mergeXhsBrowserVideo(collected.get(key), video));
     }
 
     if (collected.size === lastCount) {

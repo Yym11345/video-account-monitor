@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  buildBrowserLaunchOptions,
   exportDataset,
   filterPlatformCookies,
   isPlatformHostname,
@@ -18,6 +19,10 @@ import {
 import {
   buildXhsNoteUrl,
   extractXhsInitialState,
+  extractXhsNoteDetailFromHtml,
+  hasXhsSignedApiCookies,
+  mergeXhsBrowserVideo,
+  normalizeBrowserVideo,
   parseXhsMetric,
 } from "./adapters/xiaohongshu.mjs";
 
@@ -74,6 +79,19 @@ try {
   assert.match(html, /Demo Creator/);
   assert.match(html, /BV1demo/);
 
+  const redactedDataset = normalizeDataset({
+    account: {
+      platform: "xiaohongshu",
+      id: "u1",
+      url: "https://www.xiaohongshu.com/user/profile/u1?xsec_token=SECRET&xsec_source=pc_note",
+      warnings: ["failed with a1=SECRET; web_session=SECRET; xsec_token=SECRET"],
+    },
+    videos: [{ id: "n1", url: "https://www.xiaohongshu.com/explore/n1?xsec_token=SECRET" }],
+  });
+  assert.equal(redactedDataset.account.url, "https://www.xiaohongshu.com/user/profile/u1?xsec_token=REDACTED&xsec_source=pc_note");
+  assert.equal(redactedDataset.videos[0].url, "https://www.xiaohongshu.com/explore/n1?xsec_token=REDACTED");
+  assert.equal(redactedDataset.account.warnings[0], "failed with a1=REDACTED; web_session=REDACTED; xsec_token=REDACTED");
+
   assert.equal(normalizeAuth(undefined, false), "browser");
   assert.equal(normalizeAuth("browser", false), "browser");
   assert.throws(() => normalizeAuth(undefined, true), /--cookies is no longer supported/);
@@ -92,13 +110,54 @@ try {
   assert.equal(parseXhsMetric("1.2万"), 12000);
   assert.equal(parseXhsMetric("3k"), 3000);
   assert.equal(parseXhsMetric(""), 0);
+  assert.equal(hasXhsSignedApiCookies("a1=ok; web_session=ok"), true);
+  assert.equal(hasXhsSignedApiCookies("a1=ok"), false);
+  assert.equal(hasXhsSignedApiCookies("web_session=ok"), false);
+  assert.equal(hasXhsSignedApiCookies("foo=bar"), false);
+
+  const xhsOptions = buildBrowserLaunchOptions("xiaohongshu");
+  assert.equal(xhsOptions.headless, false);
+  assert.equal(xhsOptions.viewport.width, 1920);
+  assert.equal(xhsOptions.locale, "zh-CN");
+  assert.equal(xhsOptions.timezoneId, "Asia/Shanghai");
+  assert.equal("userAgent" in xhsOptions, false);
+  assert.equal("args" in xhsOptions, false);
+
+  const mergedXhsVideo = mergeXhsBrowserVideo(
+    normalizeBrowserVideo({ id: "abc", title: "Card title", url: "https://www.xiaohongshu.com/explore/abc", likes: "1" }),
+    normalizeBrowserVideo({ id: "abc", title: "Detail title", views: "2", comments: "3", shares: "4", favorites: "5" }),
+  );
+  assert.equal(mergedXhsVideo.title, "Card title");
+  assert.equal(mergedXhsVideo.likes, 1);
+  assert.equal(mergedXhsVideo.views, 2);
+  assert.equal(mergedXhsVideo.comments, 3);
+  assert.equal(mergedXhsVideo.shares, 4);
+  assert.equal(mergedXhsVideo.favorites, 5);
+  assert.equal(
+    normalizeBrowserVideo({ url: "https://www.xiaohongshu.com/explore/abc?xsec_token=SECRET&xsec_source=pc_note" }).url,
+    "https://www.xiaohongshu.com/explore/abc",
+  );
   assert.equal(
     buildXhsNoteUrl("68fb60030000000007020630", "TOKEN", "pc_note"),
-    "https://www.xiaohongshu.com/explore/68fb60030000000007020630?xsec_token=TOKEN&xsec_source=pc_note",
+    "https://www.xiaohongshu.com/explore/68fb60030000000007020630",
   );
   assert.deepEqual(
     extractXhsInitialState('<script>window.__INITIAL_STATE__={"user":{"userPageData":{"basicInfo":{"nickname":"奶黄包"}}}}</script>')?.user?.userPageData?.basicInfo,
     { nickname: "奶黄包" },
+  );
+  assert.equal(
+    extractXhsNoteDetailFromHtml(
+      "note1",
+      '<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"note1":{"note":{"id":"note1","title":"详情标题"}}}}}</script>',
+    )?.title,
+    "详情标题",
+  );
+  assert.equal(
+    extractXhsNoteDetailFromHtml(
+      "note1",
+      '<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"note1":{"note":{"id":"other","title":"错误详情"}}}}}</script>',
+    ),
+    null,
   );
 
   assert.equal(isPlatformHostname("www.kuaishou.com", ["kuaishou.com"]), true);

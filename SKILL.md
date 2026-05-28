@@ -15,13 +15,15 @@ Run from this skill directory:
 npm install
 ```
 
-For Xiaohongshu signed API collection, install the Python signing dependency:
+Real collection for every platform opens a visible Playwright browser session. `npm install` installs the Playwright package declared by this skill, and the collector launches local Google Chrome by default. Install Chrome on the machine before real collection.
+
+For Xiaohongshu signed API collection, install the Python signing dependency with the same interpreter that will be used by `XHS_PYTHON`:
 
 ```bash
-python -m pip install -r requirements.txt
+/path/to/python -m pip install -r requirements.txt
 ```
 
-If `python` is not the desired interpreter, set `XHS_PYTHON` before running Xiaohongshu collection:
+Set `XHS_PYTHON` to an absolute local interpreter path before running Xiaohongshu signed API collection:
 
 ```bash
 XHS_PYTHON="/path/to/python" node scripts/monitor.mjs --platform xiaohongshu --account "ACCOUNT_URL_OR_ID" --profile ./private/profiles/xiaohongshu --out ./outputs/account
@@ -47,7 +49,7 @@ With a user-controlled browser login session:
 node scripts/monitor.mjs --platform kuaishou --account "ACCOUNT_URL_OR_ID" --profile ./private/profiles/kuaishou --out ./outputs/account
 ```
 
-Real collection always opens a visible browser login session. The CLI reuses the chosen browser profile on later runs.
+Real collection always opens a visible browser login session. The CLI reuses the chosen browser profile on later runs. If Chrome is not available, install Google Chrome first, or change the browser launch configuration in `scripts/monitor.mjs` to a locally installed Playwright browser.
 
 ## Platform Status
 
@@ -64,11 +66,7 @@ The skill accepts all four platforms through the same CLI and output schema. Nat
 
 Use only user-controlled browser sessions for real collection. Never ask for passwords, SMS codes, raw cookies, or credentials. Do not commit cookies, browser profiles, exported reports containing private data, or `.env` files.
 
-Real collection opens a visible Playwright Chrome profile, lets the user log in manually, and exports cookies from that profile for the existing HTTP adapters. Install Playwright locally in this skill directory before using browser auth if it is not already available:
-
-```bash
-npm install playwright
-```
+Real collection opens a visible Playwright Chrome profile, lets the user log in manually, and exports cookies from that profile for the native adapters. The required Node dependency is installed by `npm install` from this package.
 
 `--profile` should point to a dedicated browser profile under `./private/`, not a daily-use browser profile. User-provided `--cookies`, `--auth cookie`, and `--auth none` are intentionally unsupported. If scan login, captcha, or risk-control appears, the user must complete it manually in the opened browser; do not automate or bypass verification. Do not route collection through MediaCrawler or another external crawler backend for this skill; implement platform behavior in the native adapter files under `scripts/adapters/`.
 
