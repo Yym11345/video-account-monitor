@@ -454,10 +454,15 @@ async function withBrowserSession({ platform, account, profile }, callback) {
         if (!isLoginExpiredError(error) || attempt > 0) throw error;
         console.log(`${platform} login expired. Reopening login page; please scan/login in the browser, then collection will retry automatically.`);
         await context.clearCookies();
-        await page.goto(startUrl, { waitUntil: "domcontentloaded" });
-        const sessionStabilizeMs = platform === "xiaohongshu" ? 12000 : 3000;
-        console.log(`Waiting ${sessionStabilizeMs / 1000}s for new session to propagate before retrying collection.`);
-        await page.waitForTimeout(sessionStabilizeMs);
+        if (platform === "xiaohongshu") {
+          await page.goto("https://www.xiaohongshu.com", { waitUntil: "domcontentloaded" });
+          console.log("Waiting 25s for Xiaohongshu session to fully propagate before retrying collection.");
+          await page.waitForTimeout(25000);
+        } else {
+          await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+          console.log("Waiting 3s for session to propagate before retrying collection.");
+          await page.waitForTimeout(3000);
+        }
       }
     }
   } finally {
