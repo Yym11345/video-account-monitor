@@ -538,7 +538,7 @@ async function main() {
   const { platform, collect, collectWithBrowser } = await loadAdapter(args.platform);
   const auth = normalizeAuth(args.auth, Boolean(args.cookies));
   const dataset = await withBrowserSession({ platform, account: args.account, profile: args.profile }, async ({ context, page, cookieHeader }) => {
-    const collector = platform === "xiaohongshu" && collectWithBrowser ? collectWithBrowser : collect;
+    const collector = (platform === "xiaohongshu" || platform === "kuaishou") && collectWithBrowser ? collectWithBrowser : collect;
     return await collector({
       account: args.account,
       cookieHeader,

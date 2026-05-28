@@ -424,3 +424,146 @@ export async function collect({ account, cookieHeader = "", limit, delay = 5000 
     videos,
   };
 }
+
+export async function collectWithBrowser({ account, context, page, cookieHeader = "", limit = 200, delay = 3000 }) {
+  const userId = extractUserId(account);
+  const profileUrl = `https://www.kuaishou.com/profile/${userId}`;
+
+  const collectedVideos = new Map();
+  let creatorName = "";
+  let creatorFans = 0;
+
+  const responseHandler = async (response) => {
+    try {
+      const url = response.url();
+      if (!url.includes("kuaishou.com")) return;
+      if (url.includes("/rest/v/profile/get")) {
+        const json = await response.json().catch(() => null);
+        if (json?.result === 1 && json.fans > 0) {
+          creatorName = creatorName || json.userName || "";
+          creatorFans = creatorFans || parseMetric(json.fans);
+        }
+      }
+      if (url.includes("/rest/v/profile/feed")) {
+        const json = await response.json().catch(() => null);
+        if (!json || json.result !== 1) return;
+        console.log(`Kuaishou REST profile/feed: ${json.feeds?.length ?? 0} items, pcursor=${json.pcursor || "end"}`);
+        for (const feed of json.feeds || []) {
+          if (feed.photo?.id) {
+            collectedVideos.set(String(feed.photo.id), feed.photo);
+            // Extract creator name from the first feed's author field
+            if (!creatorName && feed.author?.name) creatorName = feed.author.name;
+          }
+        }
+      }
+    } catch {}
+  };
+
+  page.on("response", responseHandler);
+  if (context) context.on("response", responseHandler);
+
+  try {
+    await page.goto("https://www.kuaishou.com", { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.waitForTimeout(1500);
+    await page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+  } catch {
+    await page.waitForTimeout(2000);
+  }
+  await page.waitForTimeout(4000);
+
+  const pageText = await page.evaluate(() => document.body?.innerText?.slice(0, 3000) || "").catch(() => "");
+  const serverError = /服务器异常|server.*error|请稍后再试/i.test(pageText);
+  const needsLogin = /扫码登录|请登录|二维码/i.test(pageText);
+  if (serverError || needsLogin) {
+    const msg = serverError
+      ? "当前登录账号被限制访问此主页（服务器异常）。请在浏览器中切换/扫码登录其他快手账号"
+      : "Kuaishou login required. Please scan QR code in the browser";
+    console.log(`${msg}. Waiting up to 10 minutes...`);
+    if (serverError) {
+      await context.clearCookies();
+      await page.goto("https://www.kuaishou.com", { waitUntil: "domcontentloaded", timeout: 30000 });
+    }
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let loggedIn = false;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(4000);
+      const cookies = await context.cookies(["https://www.kuaishou.com"]).catch(() => []);
+      const passToken = cookies.find((c) => c.name === "passToken");
+      if (passToken?.value?.length > 40) {
+        await page.waitForTimeout(3000);
+        await page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await page.waitForTimeout(5000);
+        loggedIn = true;
+        break;
+      }
+    }
+    if (!loggedIn) {
+      console.log("Kuaishou: login wait timed out; falling back to HTTP collection.");
+      return collect({ account, cookieHeader, limit, delay });
+    }
+  }
+
+  const viewport = page.viewportSize() || { width: 1280, height: 900 };
+  await page.mouse.move(Math.floor(viewport.width / 2), Math.floor(viewport.height / 3)).catch(() => {});
+
+  const maxScrolls = Math.max(24, Math.ceil((limit || 200) / 8) + 10);
+  let lastCount = 0;
+  let stableScrolls = 0;
+  for (let scroll = 0; scroll < maxScrolls && collectedVideos.size < (limit || 200); scroll += 1) {
+    try { await page.mouse.wheel(0, 800); } catch { break; }
+    try { await page.waitForTimeout(delay); } catch { break; }
+    if (collectedVideos.size === lastCount) {
+      stableScrolls += 1;
+    } else {
+      stableScrolls = 0;
+      lastCount = collectedVideos.size;
+    }
+    console.log(`Kuaishou browser collect: ${collectedVideos.size} video(s), scroll ${scroll + 1}/${maxScrolls}.`);
+    if (stableScrolls >= 4) break;
+  }
+
+  if (collectedVideos.size === 0) {
+    console.log("Kuaishou browser interception collected no videos; falling back to HTTP collection.");
+    return collect({ account, cookieHeader, limit, delay });
+  }
+
+  if (!creatorName) {
+    creatorName = await page.evaluate(() => {
+      const el = document.querySelector("h1, [class*='name'], [class*='userName']");
+      return el?.textContent?.trim() || "";
+    }).catch(() => "");
+  }
+
+  const uniqueVideos = Array.from(collectedVideos.values()).slice(0, limit || undefined);
+  const videos = uniqueVideos.map((photo) => ({
+    id: String(photo.id || ""),
+    title: photo.caption || "",
+    url: `https://www.kuaishou.com/short-video/${photo.id}`,
+    publishedAt: toIso(photo.timestamp),
+    duration: formatDuration(photo.duration),
+    likes: parseMetric(photo.realLikeCount ?? photo.likeCount),
+    views: parseMetric(photo.viewCount),
+    comments: parseMetric(photo.commentCount),
+    shares: 0,
+    favorites: 0,
+    coins: 0,
+  }));
+
+  return {
+    account: {
+      platform: "kuaishou",
+      id: userId,
+      url: profileUrl,
+      name: creatorName,
+      followers: creatorFans,
+      videoCount: videos.length,
+      totalLikes: videos.reduce((sum, v) => sum + v.likes, 0),
+      totalViews: videos.reduce((sum, v) => sum + v.views, 0),
+      totalComments: videos.reduce((sum, v) => sum + v.comments, 0),
+      collectionStatus: "complete",
+      warnings: [],
+      fetchedAt: new Date().toISOString(),
+    },
+    videos,
+  };
+}
