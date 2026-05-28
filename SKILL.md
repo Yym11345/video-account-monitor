@@ -17,13 +17,23 @@ npm install
 
 Real collection for every platform opens a visible Playwright browser session. `npm install` installs the Playwright package declared by this skill, and the collector launches local Google Chrome by default. Install Chrome on the machine before real collection.
 
-For Xiaohongshu signed API collection, install the Python signing dependency with the same interpreter that will be used by `XHS_PYTHON`:
+**Xiaohongshu requires Python for signed API collection.** Without Python, collection falls back to browser scroll mode and comment/detail metrics will be unavailable.
+
+Install Python if not already available:
+- **Windows**: download from https://www.python.org/downloads/ and check "Add Python to PATH" during install, or use Anaconda/Miniconda
+- **macOS/Linux**: `brew install python3` or use the system package manager
+
+Then install the signing dependency using the same Python interpreter that will be set as `XHS_PYTHON`:
 
 ```bash
 /path/to/python -m pip install -r requirements.txt
 ```
 
-Set `XHS_PYTHON` to an absolute local interpreter path before running Xiaohongshu signed API collection:
+Set `XHS_PYTHON` to the absolute path of your Python interpreter before running Xiaohongshu signed API collection:
+
+- **Windows (Python from python.org)**: `XHS_PYTHON="C:/Users/YourName/AppData/Local/Programs/Python/Python312/python.exe"`
+- **Windows (Anaconda)**: `XHS_PYTHON="C:/Users/YourName/anaconda3/python.exe"`
+- **macOS/Linux**: `XHS_PYTHON="/usr/bin/python3"` or `XHS_PYTHON="/opt/homebrew/bin/python3"`
 
 ```bash
 XHS_PYTHON="/path/to/python" node scripts/monitor.mjs --platform xiaohongshu --account "ACCOUNT_URL_OR_ID" --profile ./private/profiles/xiaohongshu --out ./outputs/account
